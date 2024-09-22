@@ -1,0 +1,378 @@
+#!/usr/bin/expect
+# timeout is in seconds, the response time is based on the timeout variable
+
+#####################################################
+# @Author: Muhammad Nasir Akram
+# Last_change: 5.07.2024
+#####################################################
+
+set timeout 60
+set VERSION "1.2"
+set LOGGING "YES"
+# possible values: YES or NO
+set SSH_PATH /usr/bin/ssh
+set TELNET_PATH /usr/bin/telnet
+set CONFIG_INPUT_DIR config_input
+set CONFIG_OUTPUT_DIR config_output
+set SCHEDULED_TASKS_DIR scheduled_tasks
+
+set LOG_DIR "logs"
+set LOG_FILE "events.log"
+set homeDIRECTORY $::env(HOME)
+set PWD "${homeDIRECTORY}/ConfigBot"
+
+set HOSTNAME [lindex $argv 0]
+set CALLED_FROM [lindex $argv 1]
+set COMMANDS_FILE [lindex $argv 2]
+set COMMAND_RESULT_FILE [lindex $argv 3]
+set COMPLETED_TASKS "completed_tasks.log"
+
+#----------------------------------------------
+# Functions
+#----------------------------------------------
+
+proc remove_cron_entry {} {
+	global COMMAND_RESULT_FILE
+	if { $COMMAND_RESULT_FILE != "" } {
+		log_event "removing cron entry"
+		set global_cron [exec crontab -l > $PWD/temp/global_cron.bak]		
+		set tmp_cron [exec grep -v "$COMMAND_RESULT_FILE" $PWD/temp/global_cron.bak > inverse_cron.tmp ]
+		set restore_cron [exec crontab inverse_cron.tmp]
+		log_event "cron entry removed"
+	}
+}
+
+proc notify_user_through_email {} {
+        global COMMAND_RESULT_FILE
+	global CONFIG_INPUT_DIR
+	global PWD
+	global EMAIL
+	set FILE_PRESENT [catch {exec ls $PWD/logs/temp_$COMMAND_RESULT_FILE.log 2>/dev/null} res]
+	if { $FILE_PRESENT == 0 } {
+                # open the file and read all the commands from it
+		set fid [open $PWD/logs/temp_$COMMAND_RESULT_FILE.log r]
+		set contents [read $fid]
+		close $fid
+		set global_cron [exec echo -e $contents | mail -s "ConfigBot: commands entered on the device, task-identifier: $COMMAND_RESULT_FILE" $EMAIL]
+        } else {
+		 set global_cron [exec echo "File does not exist" | mail -s "output file not found" $EMAIL]
+        }
+}
+
+proc write_to_file { file_name content } {
+        global PWD
+	global CONFIG_OUTPUT_DIR
+        exec /usr/bin/echo $content > $PWD/$CONFIG_OUTPUT_DIR/$file_name
+}
+
+# opens a file and reads the commands line by line then sends them to the logged in session
+proc run_commands { current_directory file_name } {
+	global CONFIG_INPUT_DIR
+	set FILE_EXISTS [catch {exec ls $current_directory/$CONFIG_INPUT_DIR/$file_name 2>/dev/null} res]
+	#puts "exist: $FILE_EXISTS"	
+	if { $FILE_EXISTS == 0 } {
+		# open the file and read all the commands from it
+        	set f [open "$current_directory/$CONFIG_INPUT_DIR/$file_name" r]
+        	set commands [split [read $f] "\n"]
+        	close $f
+        	foreach line $commands {
+		send "$line\r"
+        	}
+		#log_event "config successfully read from the file and will be entered on the logged-in device"
+		#remove the cron entry
+		#remove_cron_entry
+		#log_event "end"
+	} else {
+		puts "Unable to find file: $file_name under Directory: $current_directory/$CONFIG_INPUT_DIR"
+		send "\rexit\r"
+		#log_event "Unable to find: $file_name under Directory: $current_directory/$CONFIG_INPUT_DIR"
+	}
+
+}
+
+proc get_month_year {} {
+	set now [clock seconds]
+        set date [clock format $now -format {%b-%Y}]
+	return $date
+}
+
+proc get_timestamp {} {
+	set now [clock seconds]
+        set date [clock format $now -format {%H:%M:%S %b-%d-%Y}]
+	return $date
+}
+
+proc log_event { message } {
+	global LOGGING
+	global PWD
+	global LOG_DIR
+	global LOG_FILE
+	if { $LOGGING == "YES" } {
+		# log the above message in the log file
+		set month_year [get_month_year]
+		set timestamp [get_timestamp]
+		set new_log_file ${month_year}-${LOG_FILE}
+		exec /usr/bin/echo $timestamp -- $message >> $PWD/$LOG_DIR/$new_log_file
+	}
+}
+
+proc run_commands_from_script_file { CALLED_FROM } {
+	global PWD
+	global CONFIG_INPUT_DIR
+	global CONFIG_OUTPUT_DIR
+	global SCHEDULED_TASKS_DIR
+	global COMMANDS_FILE	
+	global COMMAND_RESULT_FILE
+	global COMPLETED_TASKS
+
+	if { $CALLED_FROM == "cron" } {
+
+              # log_event "script is invoked from cron, will attempt to run the commands from specified commands file"
+	      if { $COMMANDS_FILE == "" } {
+
+		        #log_event "no commands file specified, please make sure you specify source commands file"
+                        puts "no commands file specified, please make sure you specify source commands file"
+
+                } else {
+	              #log_event "will attempt to run the commands from $COMMANDS_FILE file"
+                        puts "Will attempt to run the commands from $COMMANDS_FILE file"
+                        run_commands $PWD $COMMANDS_FILE
+                }
+
+                
+	# do not enable interact & exit if you are running this script from cron. Otherwise it it will not work
+	expect eof
+	notify_user_through_email
+	exec /usr/bin/echo $COMMAND_RESULT_FILE >> $PWD/$SCHEDULED_TASKS_DIR/$COMPLETED_TASKS
+        exit
+
+        } elseif { $CALLED_FROM == "run_commands" } {
+                # open the commands file and run it on the logedin device
+                if { $COMMANDS_FILE == "" } {
+			#log_event "Invoked from run_commands. No commands file specified, no further action will be taken"
+                } else {
+			#log_event "will attempt to run the commands from $COMMANDS_FILE"
+			puts "will attempt to run commands from: $COMMANDS_FILE"
+                              run_commands $PWD $COMMANDS_FILE
+                }
+		interact
+		exit	
+	} elseif { $CALLED_FROM == "capture_command_result" } {
+		puts "capture_command_result"
+		puts "will attempt to capture command results\r"
+		if { $COMMANDS_FILE == "" } {
+
+			#log_event "cature command result: commands file not specified, no further action will be taken"
+			puts "no commands file specified, no further action will be taken"			
+
+		} elseif  { ( $COMMANDS_FILE != "" ) && ( $COMMAND_RESULT_FILE != "" ) } {
+
+                        #log_event "will attempt to run commands from $COMMANDS_FILE and capture the results in $CONFIG_OUPUT_DIR/$COMMAND_RESULT_FILE"
+			set FILE_EXISTS [catch {exec ls $PWD/$CONFIG_INPUT_DIR/$COMMANDS_FILE 2>/dev/null} res]
+        		#puts "exist: $FILE_EXISTS"
+        		if { $FILE_EXISTS == 0 } {
+                        puts "will attempt to run commands from: $COMMANDS_FILE and capture the results"
+                        run_commands $PWD $COMMANDS_FILE
+                        expect "*" {
+				set fd [open "$PWD/$CONFIG_OUTPUT_DIR/$COMMAND_RESULT_FILE" w]
+				set timeout 1
+				while 1 {
+ 				   expect {
+					puts $expect_out(0,string)
+				        -re ".+" { puts $fd $expect_out(0,string) }
+ 				        timeout  break
+    				   }
+				}
+				close $fd
+                        } 
+		    exit	
+		} else {
+
+				puts "Commands file not found: $COMMANDS_FILE Exiting...\r"
+				send "exit\r"
+		}		
+	} else {
+			puts "else is invoked"
+			#log_event "will attempt to run commands from $COMMANDS_FILE and capture the results"
+			puts "will attempt to run commands from: $COMMANDS_FILE and capture the results"
+			run_commands $PWD $COMMANDS_FILE
+			expect "*#*" {
+				set CONTENT $expect_out(buffer)"
+				write_to_file "$COMMANDS_FILE.txt" $CONTENT
+			}
+		}	
+
+        } else {
+        #log_event "will enter interactive session!"
+        interact
+        exit
+        }
+}
+
+
+# generate a random file name
+proc random_file_name {} {
+	set random_int [expr {int(rand()*9999999)}]
+	set now [clock seconds]
+          set date [clock format $now -format {%H-%M-%S_%b-%d-%Y}]
+	set random_file_name "$date-$random_int.tmp"
+	return $random_file_name
+}
+
+proc ping_host {} {
+	global HOSTNAME
+	global TEMP_FILE
+	global PWD
+	global ping_result
+	puts "attempting to ping $HOSTNAME"
+	#log_event "----------------------------"
+	#log_event "attempting to ping $HOSTNAME"
+	spawn $PWD/PingScript.sh $HOSTNAME $TEMP_FILE
+	expect eof
+	puts "- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - "
+	set ping_result [exec cat $PWD/$TEMP_FILE]
+	set tmp_err [exec rm -f $PWD/$TEMP_FILE]
+
+	# ping results
+	# 0 is ok
+	# 2 is n-ok
+	if { $ping_result == "0" } {
+ 	puts "|"
+ 	puts "attempting to connect to Host: $HOSTNAME"
+ 	puts "|"
+	} else {
+ 	puts "PING was not successfull, ssh/telnet to Host: $HOSTNAME makes no sense!"
+ 	exit
+	}
+}
+
+#----------------------------------------------
+# Functions
+#----------------------------------------------
+
+set TEMP_FILE [random_file_name]
+
+# check if credentials file exists and username and password have been set
+set FILE_EXISTS [catch {exec ls $PWD/credentials 2>/dev/null} res]
+if { $FILE_EXISTS == 0 } {
+        # yes the file exists
+} else {
+        # "lets create the credentials directory"
+        exec touch $PWD/Creds.key 2>/dev/null
+}
+
+set CREDENTIALS [exec cat $PWD/Creds.key]
+set lst [split $CREDENTIALS ":"]
+set USERNAME [lindex $lst 0]
+set PASSWORD [lindex $lst 1]
+set EMAIL [exec cat $PWD/EmailAddress.txt]
+# checking if username and password is set, otherwise exit
+if { $USERNAME == "" || $PASSWORD == "" || $EMAIL == "" } {
+        puts "\r"
+        puts "================================================\r"
+        puts "# username or password or email is not set\r"
+        puts "# please set your credentials using credentials\r"
+        puts "# by running ./ChangeCreds.sh\r"
+        puts "================================================\r"
+        puts "\r"
+        exit
+}
+
+set FUNC_RETURN [exec $PWD/DecryptPass.sh $PASSWORD $TEMP_FILE]
+set GET_DE_PASSWORD [exec cat $PWD/temp/${TEMP_FILE}.pass]
+set tmp_remove [exec rm -f $PWD/temp/${TEMP_FILE}.pass]
+# attempt to ping the host or the ip address
+puts "-|__x___x__|-" 
+puts "+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++"
+puts "██╗     ██████╗ ██████╗ ██████╗█████╗   ██╗██████╗     █████╗   ██╗
+██║    ██╔═══████╔════╝██╔════╝██████╗  ████╔════╝     ██████╗  ██║
+██║    ██║   ████║  █████║  ███████╔██╗ ████║  ███╗    ████╔██╗ ██║
+██║    ██║   ████║   ████║   ██████║╚██╗████║   ██║    ████║╚██╗██║
+███████╚██████╔╚██████╔╚██████╔████║ ╚████╚██████╔╝    ████║ ╚████║
+╚══════╝╚═════╝ ╚═════╝ ╚═════╝╚═╚═╝  ╚═══╝╚═════╝     ╚═╚═╝  ╚═══╝"
+puts "+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++"
+puts "attempting to connect to host: $HOSTNAME"
+if { $CALLED_FROM != "" } {
+	ping_host
+}
+
+# attempting ssh to the host
+spawn $SSH_PATH $USERNAME@$HOSTNAME
+expect {
+    "The authenticity of host '*' can't be established.\r
+RSA key fingerprint is *.\r
+Are you sure you want to continue connecting (yes/no)? " {
+        sleep 0.1
+        after 100
+        send -- "yes\r"
+        exp_continue
+    }
+    "Warning: the RSA host key for '*' differs from the key for the IP address '*'\r
+Offending key for IP in /home/xxxxx/*/.ssh/known_hosts:*\r
+Matching host key in /home/xxxxx/*/.ssh/known_hosts:* " {
+        sleep 0.1
+        after 100
+        send -- "yes\r"
+        exp_continue
+    }
+    "Warning: the RSA host key for '*' differs from the key for the IP address '*\r'
+Offending key for IP in /home/xxxxx/*/.ssh/known_hosts:*\r
+Are you sure you want to continue connecting (yes/no)? " {
+        sleep 0.1
+        after 100
+        send -- "yes\r"
+        exp_continue
+    }
+    "Are you sure you want to continue connecting (yes/no)? $" {
+        sleep 0.1
+        after 100
+        send -- "yes\r"
+        exp_continue
+     }
+    "User Authentication\r\r
+Enter password:" {
+        sleep 0.1
+        after 100
+        send "$GET_DE_PASSWORD\r"
+        interact
+    }
+   -re {Password:$} {
+        sleep 0.1
+        after 100
+        send "$GET_DE_PASSWORD\r"
+	run_commands_from_script_file $CALLED_FROM
+        interact
+    }
+    "*Password:*" {
+        sleep 0.1
+        after 100
+        send "$GET_DE_PASSWORD\r"
+        interact
+    } 
+    "#*" {
+	  sleep 0.1
+          after 100
+          send "$GET_DE_PASSWORD\r"
+          after 100
+          run_commands_from_script_file $CALLED_FROM
+	interact
+    }
+
+    ### Error handling ###
+    ERROR {
+	puts "An Error was encountered"
+	log_event "An error was encountered"
+    }
+    eof {
+	#puts "End of file reached"
+	puts "\r"
+	puts "ssh not successfull\r"
+	#log_event "ssh not successfull"
+    }
+    timeout {
+	# This is invoked when the timeout is reached
+	puts "timedout"
+	#log_event "timedout"
+    }
+}
+

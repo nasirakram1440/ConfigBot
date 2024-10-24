@@ -96,7 +96,7 @@ read_selection() {
 	return $selection
 }
 encrypt_password() {
-	echo $password | openssl aes-256-cbc -a -salt -pass pass:versatel
+	echo $password | openssl aes-256-cbc -a -salt -pass pass:xxxxx
 }
 back_to_current_menu() {
         clear_screen
